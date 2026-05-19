@@ -89,13 +89,13 @@ data "aws_ami" "amazon_linux" {
 # ==============================================================
 resource "aws_security_group" "web_sg" {
   name        = "${var.project_name}-sg"
-  description = "Security Group für ${var.project_name} EC2-Instanzen"
+  description = "Security Group fuer ${var.project_name} EC2-Instanzen"
 
   # --- Eingehend: SSH nur von der erlaubten IP-Adresse ---
   # Sicherheitshinweis: Setze var.ssh_allowed_cidr auf deine eigene IP,
   # z.B. "203.0.113.5/32". Niemals "0.0.0.0/0" in Produktion verwenden!
   ingress {
-    description = "SSH-Zugang (nur erlaubte IP)"
+    description = "SSH-Zugang - nur erlaubte IP"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -104,7 +104,7 @@ resource "aws_security_group" "web_sg" {
 
   # --- Eingehend: HTTP für alle ---
   ingress {
-    description = "HTTP-Zugang (öffentlich)"
+    description = "HTTP-Zugang - oeffentlich"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -113,7 +113,7 @@ resource "aws_security_group" "web_sg" {
 
   # --- Ausgehend: Gesamten Ausgangsverkehr erlauben ---
   egress {
-    description = "Gesamten ausgehenden Datenverkehr erlauben"
+    description = "Ausgehenden Datenverkehr erlauben"
     from_port   = 0
     to_port     = 0
     protocol    = "-1" # -1 bedeutet ALLE Protokolle

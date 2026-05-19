@@ -87,5 +87,5 @@ variable "environment" {
 variable "s3_bucket_name" {
   description = "Weltweit eindeutiger Name für den S3-Bucket."
   type        = string
-  default     = "terraform-wiederholung-bucket-guapa-2024"
+  default     = "terraform-wiederholung-bucket-2026"
 }
