@@ -1,71 +1,91 @@
 # ==============================================================
 # variables.tf
-# All input variables for the terraform-wiederholung project.
-# Values can be overridden with:
-#   terraform apply -var="variable_name=value"
-# or via a terraform.tfvars file.
+# Alle Eingabevariablen für das terraform-wiederholung-Projekt.
+# Werte können überschrieben werden mit:
+#   terraform apply -var="variablenname=wert"
+# oder über eine terraform.tfvars-Datei.
 # ==============================================================
 
-# ---------------------------------------------------------------
-# AWS Region
-# ---------------------------------------------------------------
+
+# --------------------------------------------------------------
+# AWS-Region
+# --------------------------------------------------------------
 variable "aws_region" {
-  description = "The AWS region where all resources will be created."
+  description = "Die AWS-Region, in der alle Ressourcen erstellt werden."
   type        = string
   default     = "eu-central-1"
 }
 
-# ---------------------------------------------------------------
-# EC2 Instance Type
-# ---------------------------------------------------------------
+
+# --------------------------------------------------------------
+# EC2-Instanztyp
+# --------------------------------------------------------------
 variable "aws_instance_type" {
-  description = "EC2 instance type. Can be overridden at apply time."
+  description = "EC2-Instanztyp. Kann zur Laufzeit überschrieben werden."
   type        = string
-  default     = "t2.micro" # Free-tier eligible
+  default     = "t2.micro" # Free-Tier geeignet
 }
 
-# ---------------------------------------------------------------
-# AMI ID (Amazon Machine Image)
-# This is the Amazon Linux 2 AMI for eu-central-1.
-# Always verify the latest AMI in the AWS Console for your region.
-# ---------------------------------------------------------------
-variable "ami_id" {
-  description = "AMI ID to use for EC2 instances. Must match the selected region."
-  type        = string
-  default     = "ami-0a261c0e5f51090b1" # Amazon Linux 2, eu-central-1
-}
 
-# ---------------------------------------------------------------
-# Number of EC2 instances to create (used with count)
-# ---------------------------------------------------------------
+# --------------------------------------------------------------
+# Anzahl der EC2-Instanzen (wird mit count verwendet)
+# --------------------------------------------------------------
 variable "instance_count" {
-  description = "How many EC2 instances to create."
+  description = "Wie viele EC2-Instanzen erstellt werden sollen."
   type        = number
   default     = 2
 }
 
-# ---------------------------------------------------------------
-# Project metadata (used for Tags)
-# ---------------------------------------------------------------
+
+# --------------------------------------------------------------
+# SSH Key-Pair Name
+# Muss vorher in AWS erstellt werden (pro Region unterschiedlich).
+# Erstellung per CLI:
+#   aws ec2 create-key-pair --key-name <name> \
+#     --query 'KeyMaterial' --output text > <name>.pem
+#   chmod 400 <name>.pem
+# --------------------------------------------------------------
+variable "key_name" {
+  description = "Name des AWS Key-Pairs für den SSH-Zugang zu den EC2-Instanzen."
+  type        = string
+}
+
+
+# --------------------------------------------------------------
+# Erlaubte IP-Adresse für SSH-Zugang (Port 22)
+# Format: "x.x.x.x/32" für eine einzelne IP-Adresse.
+# Eigene IP herausfinden: curl ifconfig.me
+# NIEMALS "0.0.0.0/0" in Produktionsumgebungen verwenden!
+# --------------------------------------------------------------
+variable "ssh_allowed_cidr" {
+  description = "CIDR-Block der erlaubten IP-Adresse für SSH (z.B. '203.0.113.5/32')."
+  type        = string
+}
+
+
+# --------------------------------------------------------------
+# Projekt-Metadaten (für Tags)
+# --------------------------------------------------------------
 variable "project_name" {
-  description = "Name tag for all resources. Helps identify resources in AWS Console."
+  description = "Name-Tag für alle Ressourcen. Hilft bei der Identifikation in der AWS-Konsole."
   type        = string
   default     = "terraform-wiederholung"
 }
 
 variable "environment" {
-  description = "Environment label, e.g. dev, staging, prod."
+  description = "Umgebungsbezeichnung, z.B. dev, staging, prod."
   type        = string
   default     = "dev"
 }
 
-# ---------------------------------------------------------------
-# S3 Bucket Name
-# S3 bucket names must be globally unique across ALL AWS accounts.
-# Add a unique suffix (e.g. your name or timestamp) to avoid conflicts.
-# ---------------------------------------------------------------
+
+# --------------------------------------------------------------
+# S3-Bucket-Name
+# S3-Bucket-Namen müssen weltweit eindeutig sein (über ALLE AWS-Konten).
+# Füge ein eindeutiges Suffix hinzu, um Konflikte zu vermeiden.
+# --------------------------------------------------------------
 variable "s3_bucket_name" {
-  description = "Globally unique name for the S3 bucket."
+  description = "Weltweit eindeutiger Name für den S3-Bucket."
   type        = string
   default     = "terraform-wiederholung-bucket-guapa-2024"
 }

@@ -1,0 +1,187 @@
+# ==============================================================
+# terraform-destroy.yml
+#
+# Dieser Workflow führt `terraform destroy` aus und löscht
+# alle erstellten AWS-Ressourcen.
+#
+# WICHTIG: Immer nach dem Testen ausführen, um unnötige AWS-Kosten
+# zu vermeiden!
+#
+# Auslöser:
+#   - Manuell (workflow_dispatch) mit optionalem Bestätigungsfeld
+#   - Zeitgesteuert: Montag–Freitag um 18:00 Uhr (CET/CEST)
+#
+# Benötigte GitHub Secrets:
+#   - AWS_ACCESS_KEY_ID       → AWS Zugangsdaten (Schlüssel-ID)
+#   - AWS_SECRET_ACCESS_KEY   → AWS Zugangsdaten (geheimer Schlüssel)
+#   - SLACK_WEBHOOK_URL       → Slack Webhook-URL (optional)
+# ==============================================================
+
+name: "Terraform Destroy"
+
+on:
+  # Manueller Auslöser mit Bestätigungsfeld — verhindert versehentliches Löschen
+  workflow_dispatch:
+    inputs:
+      bestaetigung:
+        description: 'Zum Bestätigen "destroy" eingeben'
+        required: true
+        default: ""
+      grund:
+        description: "Grund für das Löschen (für Protokoll)"
+        required: false
+        default: "Manuelle Bereinigung"
+
+  # Zeitgesteuert: Montag–Freitag um 16:00 UTC (= 18:00 CET / 19:00 CEST)
+  schedule:
+    - cron: "0 16 * * 1-5"
+
+jobs:
+  # ------------------------------------------------------------
+  # Sicherheitsprüfung (nur bei manuellem Auslöser)
+  # Verhindert, dass der Destroy ohne Bestätigung läuft.
+  # ------------------------------------------------------------
+  sicherheitspruefung:
+    name: "Sicherheitsprüfung"
+    runs-on: ubuntu-latest
+    # Nur ausführen wenn manuell ausgelöst
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: "Bestätigung prüfen"
+        run: |
+          if [ "${{ github.event.inputs.bestaetigung }}" != "destroy" ]; then
+            echo "Fehler: Zur Bestätigung muss 'destroy' eingegeben werden."
+            echo "Eingabe war: '${{ github.event.inputs.bestaetigung }}'"
+            exit 1
+          fi
+          echo "Bestätigung erhalten. Destroy wird ausgeführt."
+          echo "Grund: ${{ github.event.inputs.grund }}"
+
+  terraform-destroy:
+    name: "Infrastruktur löschen"
+    runs-on: ubuntu-latest
+    # Wartet auf Sicherheitsprüfung, falls manuell ausgelöst
+    needs: [sicherheitspruefung]
+    # Läuft auch wenn sicherheitspruefung übersprungen wurde (bei schedule)
+    if: |
+      always() &&
+      (needs.sicherheitspruefung.result == 'success' || needs.sicherheitspruefung.result == 'skipped')
+
+    steps:
+      # ------------------------------------------------------------
+      # Schritt 1: Code auschecken
+      # ------------------------------------------------------------
+      - name: "Code auschecken"
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # Schritt 2: Terraform installieren
+      # Gleiche Version wie im Apply-Workflow für Konsistenz!
+      # ------------------------------------------------------------
+      - name: "Terraform installieren"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.0"
+          terraform_wrapper: false
+
+      # ------------------------------------------------------------
+      # Schritt 3: AWS Zugangsdaten konfigurieren
+      # ------------------------------------------------------------
+      - name: "AWS Zugangsdaten konfigurieren"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      # ------------------------------------------------------------
+      # Schritt 4: Terraform initialisieren
+      # Verbindet sich mit dem S3-Backend um den aktuellen State zu lesen.
+      # ------------------------------------------------------------
+      - name: "Terraform Init"
+        run: terraform init
+
+      # ------------------------------------------------------------
+      # Schritt 5: Aktuellen State prüfen (was wird gelöscht?)
+      # Gibt eine Übersicht der vorhandenen Ressourcen aus.
+      # ------------------------------------------------------------
+      - name: "Vorhandene Ressourcen anzeigen"
+        run: |
+          echo "=== Folgende Ressourcen werden gelöscht ==="
+          terraform state list 2>/dev/null || echo "Keine Ressourcen im State gefunden."
+
+      # ------------------------------------------------------------
+      # Schritt 6: Terraform Destroy ausführen
+      # Für required-Variablen ohne Default werden Platzhalterwerte übergeben,
+      # da diese beim Destroy nicht für Ressourcen-Erstellung verwendet werden.
+      # ------------------------------------------------------------
+      - name: "Terraform Destroy"
+        run: |
+          terraform destroy -auto-approve \
+            -var="ssh_allowed_cidr=0.0.0.0/0" \
+            -var="key_name=placeholder-fuer-destroy"
+
+      # ------------------------------------------------------------
+      # Schritt 7: Bestätigung ausgeben
+      # ------------------------------------------------------------
+      - name: "Destroy-Zusammenfassung"
+        if: success()
+        run: |
+          echo "============================================"
+          echo "Alle AWS-Ressourcen wurden erfolgreich gelöscht."
+          echo "Ausgelöst durch: ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Ausgeführt von: ${{ github.actor }}"
+            echo "Grund: ${{ github.event.inputs.grund }}"
+          fi
+          echo "============================================"
+
+      # ------------------------------------------------------------
+      # Schritt 8: Slack-Benachrichtigung — Destroy erfolgreich
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung senden (Destroy erfolgreich)"
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🗑️ *Terraform Destroy erfolgreich!*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🗑️ *Terraform Destroy erfolgreich!*\n*Projekt:* `terraform-wiederholung`\n*Auslöser:* `${{ github.event_name }}`\n*Ausgeführt von:* ${{ github.actor }}\n*Alle AWS-Ressourcen wurden gelöscht — keine weiteren Kosten entstehen.*"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      # ------------------------------------------------------------
+      # Schritt 9: Slack-Benachrichtigung — Destroy fehlgeschlagen
+      # Bei Fehler sofort informieren, da Ressourcen weiter Kosten verursachen!
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung senden (Fehler)"
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "⚠️ *Terraform Destroy fehlgeschlagen — Ressourcen laufen noch!*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *Terraform Destroy fehlgeschlagen!*\n*Projekt:* `terraform-wiederholung`\n*ACHTUNG: AWS-Ressourcen wurden NICHT gelöscht — es entstehen weiterhin Kosten!*\n*Details:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow-Log öffnen>\n*Bitte manuell prüfen und bereinigen!*"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

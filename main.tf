@@ -1,19 +1,54 @@
 # ==============================================================
 # main.tf
-# Core infrastructure definition for terraform-wiederholung.
+# Haupt-Infrastrukturdatei für terraform-wiederholung.
 #
-# Resources created:
-#   1. AWS Provider configuration
-#   2. Security Group (SSH + HTTP)
-#   3. EC2 Instances (multiple, via count)
-#   4. S3 Bucket
+# Erstellte Ressourcen:
+#   1. AWS Provider-Konfiguration
+#   2. Datenbeschaffung: aktuelles Amazon Linux 2 AMI
+#   3. Security Group (SSH + HTTP)
+#   4. EC2-Instanzen (mehrere via count)
+#   5. S3-Bucket mit Zugriffskontrolle
 # ==============================================================
 
 
 # ==============================================================
-# PROVIDER BLOCK
-# Tells Terraform which cloud provider to use and in which region.
-# All variables come from variables.tf.
+# TERRAFORM-BLOCK
+# Definiert das Remote Backend (S3 + DynamoDB) für die State-Datei.
+#
+# WICHTIG: Diese Ressourcen müssen VORHER manuell erstellt werden,
+# bevor `terraform init` ausgeführt wird:
+#   1. S3-Bucket für den State
+#   2. DynamoDB-Tabelle für State-Locking (Attribut: LockID, Typ: S)
+#
+# Anleitung:
+#   aws s3api create-bucket --bucket <dein-state-bucket> --region eu-central-1 \
+#     --create-bucket-configuration LocationConstraint=eu-central-1
+#   aws dynamodb create-table --table-name terraform-state-lock \
+#     --attribute-definitions AttributeName=LockID,AttributeType=S \
+#     --key-schema AttributeName=LockID,KeyType=HASH \
+#     --billing-mode PAY_PER_REQUEST --region eu-central-1
+# ==============================================================
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  backend "s3" {
+    bucket         = "terraform-wiederholung-state-bucket" # <-- deinen Bucket-Namen einsetzen
+    key            = "terraform-wiederholung/terraform.tfstate"
+    region         = "eu-central-1"
+    dynamodb_table = "terraform-state-lock" # Verhindert gleichzeitiges Schreiben
+    encrypt        = true                   # State-Datei wird verschlüsselt gespeichert
+  }
+}
+
+
+# ==============================================================
+# PROVIDER-BLOCK
+# Gibt an, welcher Cloud-Anbieter verwendet wird und in welcher Region.
 # ==============================================================
 provider "aws" {
   region = var.aws_region
@@ -21,49 +56,70 @@ provider "aws" {
 
 
 # ==============================================================
-# SECURITY GROUP
-# A Security Group is a virtual firewall that controls inbound
-# and outbound traffic for your EC2 instances.
+# AMI-DATENBESCHAFFUNG (Data Source)
+# Sucht automatisch das aktuellste Amazon Linux 2 AMI für die
+# gewählte Region. Dadurch wird eine veraltete hardcoded AMI-ID vermieden.
 #
-# We open:
-#   - Port 22  (SSH)  → for remote terminal access
-#   - Port 80  (HTTP) → for web traffic
-#   - All outbound traffic is allowed (standard practice)
+# Verwendung: data.aws_ami.amazon_linux.id
+# ==============================================================
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"] # Nur offizielle Amazon-Images
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+
+# ==============================================================
+# SECURITY GROUP
+# Virtuelle Firewall für die EC2-Instanzen.
+#
+# Geöffnete Ports:
+#   - Port 22  (SSH)  → nur für die erlaubte IP-Adresse (var.ssh_allowed_cidr)
+#   - Port 80  (HTTP) → für alle (öffentliche Webseite)
+#   - Ausgehender Datenverkehr: vollständig erlaubt (Standard)
 # ==============================================================
 resource "aws_security_group" "web_sg" {
   name        = "${var.project_name}-sg"
-  description = "Security Group for ${var.project_name} EC2 instances"
+  description = "Security Group für ${var.project_name} EC2-Instanzen"
 
-  # --- Inbound: Allow SSH from anywhere (Port 22) ---
-  # WARNING: In production, restrict this to your own IP!
-  # Example for your own IP: cidr_blocks = ["YOUR_IP/32"]
+  # --- Eingehend: SSH nur von der erlaubten IP-Adresse ---
+  # Sicherheitshinweis: Setze var.ssh_allowed_cidr auf deine eigene IP,
+  # z.B. "203.0.113.5/32". Niemals "0.0.0.0/0" in Produktion verwenden!
   ingress {
-    description = "SSH access"
+    description = "SSH-Zugang (nur erlaubte IP)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.ssh_allowed_cidr]
   }
 
-  # --- Inbound: Allow HTTP from anywhere (Port 80) ---
+  # --- Eingehend: HTTP für alle ---
   ingress {
-    description = "HTTP access"
+    description = "HTTP-Zugang (öffentlich)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # --- Outbound: Allow all outbound traffic ---
+  # --- Ausgehend: Gesamten Ausgangsverkehr erlauben ---
   egress {
-    description = "Allow all outbound traffic"
+    description = "Gesamten ausgehenden Datenverkehr erlauben"
     from_port   = 0
     to_port     = 0
-    protocol    = "-1" # -1 means ALL protocols
+    protocol    = "-1" # -1 bedeutet ALLE Protokolle
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Tags help identify and organize resources in the AWS Console
   tags = {
     Name        = "${var.project_name}-sg"
     Project     = var.project_name
@@ -73,42 +129,45 @@ resource "aws_security_group" "web_sg" {
 
 
 # ==============================================================
-# EC2 INSTANCES
-# We use `count` to create multiple instances from one block.
+# EC2-INSTANZEN
+# Erstellt mehrere Instanzen über den `count`-Parameter.
 #
-# count.index → 0, 1, 2, ... (used for unique naming)
+# count.index → 0, 1, 2, ... (für eindeutige Benennung)
 #
-# Each instance:
-#   - Uses the AMI and instance type from variables.tf
-#   - Gets attached to our Security Group above
-#   - Gets unique Name, Project, Environment, and Instance tags
+# Jede Instanz:
+#   - Verwendet das aktuellste AMI (via Data Source, nicht hardcoded)
+#   - Wird mit dem SSH-Key-Pair verbunden (var.key_name)
+#   - Gehört zur oben definierten Security Group
 # ==============================================================
 resource "aws_instance" "web" {
-  count         = var.instance_count # Creates N instances
-  ami           = var.ami_id
+  count         = var.instance_count
+  ami           = data.aws_ami.amazon_linux.id # Automatisch aktuellstes AMI
   instance_type = var.aws_instance_type
 
-  # Attach the Security Group we defined above
+  # SSH-Key-Pair für den Zugang zur Instanz
+  # Muss vorher in der AWS-Konsole oder per CLI erstellt werden:
+  #   aws ec2 create-key-pair --key-name <name> --query 'KeyMaterial' \
+  #     --output text > <name>.pem
+  key_name = var.key_name
+
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
-  # Tags for each instance — count.index makes the name unique
   tags = {
-    Name        = "${var.project_name}-instance-${count.index + 1}"
+    Name        = "${var.project_name}-instanz-${count.index + 1}"
     Project     = var.project_name
     Environment = var.environment
-    Instance    = "instance-${count.index + 1}"
+    Instance    = "instanz-${count.index + 1}"
   }
 }
 
 
 # ==============================================================
-# S3 BUCKET
-# S3 is AWS object storage — like a folder in the cloud.
-# Bucket names must be globally unique across all AWS accounts!
+# S3-BUCKET
+# Objektspeicher in der Cloud. Bucket-Namen müssen weltweit eindeutig sein.
 #
-# We also add:
-#   - Ownership controls (best practice since 2023)
-#   - A private ACL (bucket is not publicly accessible)
+# Zusätzliche Ressourcen:
+#   - Eigentumsregeln (seit 2023 empfohlen)
+#   - Vollständige Sperrung des öffentlichen Zugriffs (Sicherheit)
 # ==============================================================
 resource "aws_s3_bucket" "main" {
   bucket = var.s3_bucket_name
@@ -120,7 +179,7 @@ resource "aws_s3_bucket" "main" {
   }
 }
 
-# Ownership controls — recommended since AWS changed default settings
+# Eigentumsregeln — empfohlen seit der AWS-Standardänderung 2023
 resource "aws_s3_bucket_ownership_controls" "main" {
   bucket = aws_s3_bucket.main.id
 
@@ -129,7 +188,7 @@ resource "aws_s3_bucket_ownership_controls" "main" {
   }
 }
 
-# Block all public access — important for security
+# Öffentlichen Zugriff vollständig sperren — wichtig für die Sicherheit
 resource "aws_s3_bucket_public_access_block" "main" {
   bucket = aws_s3_bucket.main.id
 

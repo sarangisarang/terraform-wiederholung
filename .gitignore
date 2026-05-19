@@ -1,5 +1,34 @@
+# ==============================================================
+# .gitignore für Terraform-Projekte
+# ==============================================================
+
+# Terraform-Arbeitsverzeichnis (Provider-Binaries, Caches)
 .terraform/
+
+# State-Dateien — NIEMALS committen! Enthalten sensible Ressourcendetails.
+# State wird im S3-Backend gespeichert.
 *.tfstate
 *.tfstate.backup
-.terraform.lock.hcl
+
+# Crash-Log von Terraform
+crash.log
+
+# Sensible Variablendateien — niemals committen!
+# Stattdessen Werte über GitHub Secrets oder Umgebungsvariablen setzen.
 *.tfvars
+*.tfvars.json
+
+# .terraform.lock.hcl NICHT ausschließen — sollte committet werden!
+# (Stellt reproduzierbare Provider-Versionen sicher, ähnlich wie package-lock.json)
+
+# SSH-Schlüsseldateien
+*.pem
+*.key
+
+# macOS-Systemdateien
+.DS_Store
+
+# IDE-Einstellungen
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,248 @@
+# ==============================================================
+# terraform-plan.yml
+#
+# Dieser Workflow führt `terraform plan` aus und zeigt eine
+# Vorschau der Änderungen bei jedem Pull Request auf main.
+#
+# Zweck:
+#   - Änderungen PRÜFEN, BEVOR sie deployed werden
+#   - Plan-Output direkt als PR-Kommentar anzeigen
+#   - Verhindert überraschende Änderungen nach dem Merge
+#
+# Auslöser:
+#   - Pull Request auf den main-Branch (geöffnet, aktualisiert, erneut geöffnet)
+#   - Manuell (workflow_dispatch)
+#
+# Benötigte GitHub Secrets:
+#   - AWS_ACCESS_KEY_ID       → AWS Zugangsdaten (Schlüssel-ID)
+#   - AWS_SECRET_ACCESS_KEY   → AWS Zugangsdaten (geheimer Schlüssel)
+#   - SLACK_WEBHOOK_URL       → Slack Webhook-URL (optional)
+# ==============================================================
+
+name: "Terraform Plan (PR-Vorschau)"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform-plan.yml"
+
+  # Manueller Auslöser (z.B. zum Testen ohne PR)
+  workflow_dispatch:
+
+# Verhindert gleichzeitige Plan-Runs für denselben PR
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+
+    # Berechtigung für PR-Kommentare
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # ------------------------------------------------------------
+      # Schritt 1: Code auschecken
+      # ------------------------------------------------------------
+      - name: "Code auschecken"
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # Schritt 2: Terraform installieren
+      # Gleiche Version wie im Apply-Workflow für Konsistenz!
+      # ------------------------------------------------------------
+      - name: "Terraform installieren"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.0"
+          terraform_wrapper: false
+
+      # ------------------------------------------------------------
+      # Schritt 3: AWS Zugangsdaten konfigurieren
+      # ------------------------------------------------------------
+      - name: "AWS Zugangsdaten konfigurieren"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      # ------------------------------------------------------------
+      # Schritt 4: Öffentliche IP des Runners ermitteln
+      # (wird als Platzhalter für ssh_allowed_cidr verwendet)
+      # ------------------------------------------------------------
+      - name: "Öffentliche IP des Runners ermitteln"
+        id: runner-ip
+        run: |
+          RUNNER_IP=$(curl -s ifconfig.me)
+          echo "ip=${RUNNER_IP}/32" >> $GITHUB_OUTPUT
+          echo "Runner-IP: ${RUNNER_IP}/32"
+
+      # ------------------------------------------------------------
+      # Schritt 5: Terraform initialisieren
+      # ------------------------------------------------------------
+      - name: "Terraform Init"
+        id: init
+        run: terraform init
+
+      # ------------------------------------------------------------
+      # Schritt 6: Terraform Validate — Syntax prüfen
+      # ------------------------------------------------------------
+      - name: "Terraform Validate"
+        id: validate
+        run: terraform validate -no-color
+
+      # ------------------------------------------------------------
+      # Schritt 7: Terraform Format prüfen
+      # Gibt eine Warnung aus (kein Fehler), wenn Code nicht formatiert ist.
+      # ------------------------------------------------------------
+      - name: "Terraform Format prüfen"
+        id: fmt
+        run: terraform fmt -check -no-color
+        continue-on-error: true
+
+      # ------------------------------------------------------------
+      # Schritt 8: Terraform Plan ausführen und Output speichern
+      # ------------------------------------------------------------
+      - name: "Terraform Plan"
+        id: plan
+        run: |
+          terraform plan -no-color \
+            -var="ssh_allowed_cidr=${{ steps.runner-ip.outputs.ip }}" \
+            -var="key_name=plan-preview-placeholder" \
+            -out=tfplan 2>&1 | tee /tmp/plan_output.txt
+
+          # Exit-Code 0 = keine Änderungen, 2 = Änderungen vorhanden, 1 = Fehler
+          PLAN_EXIT=${PIPESTATUS[0]}
+          if [ "$PLAN_EXIT" -eq 1 ]; then
+            echo "Terraform Plan fehlgeschlagen!"
+            exit 1
+          fi
+
+          echo "plan_exit=${PLAN_EXIT}" >> $GITHUB_OUTPUT
+        continue-on-error: false
+
+      # ------------------------------------------------------------
+      # Schritt 9: Plan-Output als PR-Kommentar posten
+      # Zeigt die geplanten Änderungen direkt im Pull Request an.
+      # ------------------------------------------------------------
+      - name: "Plan-Ergebnis als PR-Kommentar posten"
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('/tmp/plan_output.txt', 'utf8');
+
+            // Nur die letzten 60.000 Zeichen (GitHub-Kommentarlimit: 65.536 Zeichen)
+            const trimmedOutput = planOutput.length > 60000
+              ? '...(gekürzt, zu lang)...\n' + planOutput.slice(-60000)
+              : planOutput;
+
+            const fmtStatus = '${{ steps.fmt.outcome }}' === 'success' ? '✅' : '⚠️';
+            const validateStatus = '${{ steps.validate.outcome }}' === 'success' ? '✅' : '❌';
+            const planStatus = '${{ steps.plan.outcome }}' === 'success' ? '✅' : '❌';
+
+            const body = `## Terraform Plan Ergebnis
+
+            | Schritt | Status |
+            |---------|--------|
+            | Format  | ${fmtStatus} \`${{ steps.fmt.outcome }}\` |
+            | Validate | ${validateStatus} \`${{ steps.validate.outcome }}\` |
+            | Plan    | ${planStatus} \`${{ steps.plan.outcome }}\` |
+
+            <details>
+            <summary>Plan-Details anzeigen</summary>
+
+            \`\`\`terraform
+            ${trimmedOutput}
+            \`\`\`
+
+            </details>
+
+            *Ausgeführt von: \`${{ github.actor }}\` | Commit: \`${{ github.sha }}\`*`;
+
+            // Bestehenden Plan-Kommentar suchen und aktualisieren (statt neu erstellen)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('Terraform Plan Ergebnis')
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
+
+      # ------------------------------------------------------------
+      # Schritt 10: Slack-Benachrichtigung — Plan erfolgreich
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung (Plan erfolgreich)"
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🔍 *Terraform Plan abgeschlossen*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🔍 *Terraform Plan abgeschlossen*\n*Projekt:* `terraform-wiederholung`\n*PR:* <${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }} ${{ github.event.pull_request.title }}>\n*Branch:* `${{ github.head_ref }}`\n*Ausgeführt von:* ${{ github.actor }}\n*Plan-Log:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow öffnen>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      # ------------------------------------------------------------
+      # Schritt 11: Slack-Benachrichtigung — Plan fehlgeschlagen
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung (Plan fehlgeschlagen)"
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "❌ *Terraform Plan fehlgeschlagen!*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Terraform Plan fehlgeschlagen!*\n*Projekt:* `terraform-wiederholung`\n*PR:* <${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}>\n*Branch:* `${{ github.head_ref }}`\n*Details:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow-Log öffnen>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

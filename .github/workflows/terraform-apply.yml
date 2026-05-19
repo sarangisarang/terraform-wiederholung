@@ -1,0 +1,275 @@
+# ==============================================================
+# terraform-apply.yml
+#
+# Dieser Workflow führt `terraform apply` aus und deployt
+# eine index.html auf die EC2-Instanz per SSH.
+#
+# Auslöser:
+#   - Push auf den main-Branch
+#   - Manuell (workflow_dispatch)
+#   - Zeitgesteuert: Montag–Freitag um 08:00 Uhr (CET/CEST)
+#
+# Benötigte GitHub Secrets:
+#   - AWS_ACCESS_KEY_ID       → AWS Zugangsdaten (Schlüssel-ID)
+#   - AWS_SECRET_ACCESS_KEY   → AWS Zugangsdaten (geheimer Schlüssel)
+#   - EC2_KEY_NAME            → Name des AWS Key-Pairs (z.B. "mein-key")
+#   - EC2_SSH_PRIVATE_KEY     → Inhalt der .pem-Datei (privater SSH-Schlüssel)
+#   - SLACK_WEBHOOK_URL       → Slack Webhook-URL (optional, für Benachrichtigungen)
+# ==============================================================
+
+name: "Terraform Apply"
+
+on:
+  push:
+    branches:
+      - main
+
+  # Manueller Auslöser über die GitHub Actions-Oberfläche
+  workflow_dispatch:
+
+  # Zeitgesteuert: Montag–Freitag um 06:00 UTC (= 08:00 CET / 09:00 CEST)
+  schedule:
+    - cron: "0 6 * * 1-5"
+
+jobs:
+  terraform-apply:
+    name: "Infrastruktur erstellen und deployen"
+    runs-on: ubuntu-latest
+
+    # Ausgabewerte, die andere Jobs oder Steps verwenden können
+    outputs:
+      public_ip: ${{ steps.terraform-output.outputs.public_ip }}
+
+    steps:
+      # ------------------------------------------------------------
+      # Schritt 1: Code aus dem Repository auschecken
+      # ------------------------------------------------------------
+      - name: "Code auschecken"
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # Schritt 2: Terraform installieren (bestimmte Version festlegen
+      # für reproduzierbare Builds)
+      # ------------------------------------------------------------
+      - name: "Terraform installieren"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.0"
+          terraform_wrapper: false # Deaktiviert den Wrapper für sauberere Output-Verarbeitung
+
+      # ------------------------------------------------------------
+      # Schritt 3: AWS Zugangsdaten konfigurieren
+      # Die Werte kommen aus den GitHub Secrets des Repositories.
+      # Niemals echte Zugangsdaten direkt in den Workflow schreiben!
+      # ------------------------------------------------------------
+      - name: "AWS Zugangsdaten konfigurieren"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      # ------------------------------------------------------------
+      # Schritt 4: Öffentliche IP des GitHub Actions Runners ermitteln.
+      # Diese IP wird für die SSH Security Group freigegeben,
+      # damit der Runner sich später mit der EC2-Instanz verbinden kann.
+      # ------------------------------------------------------------
+      - name: "Öffentliche IP des Runners ermitteln"
+        id: runner-ip
+        run: |
+          RUNNER_IP=$(curl -s ifconfig.me)
+          echo "ip=${RUNNER_IP}/32" >> $GITHUB_OUTPUT
+          echo "Runner-IP: ${RUNNER_IP}/32"
+
+      # ------------------------------------------------------------
+      # Schritt 5: Terraform initialisieren
+      # Lädt Provider-Plugins herunter und verbindet sich mit dem
+      # S3-Backend für die State-Datei.
+      # ------------------------------------------------------------
+      - name: "Terraform Init"
+        run: terraform init
+
+      # ------------------------------------------------------------
+      # Schritt 6: Terraform Apply ausführen
+      # -auto-approve → keine manuelle Bestätigung erforderlich
+      # Variablen werden als Flags übergeben (keine hardcoded Werte in tfvars):
+      #   - ssh_allowed_cidr: nur der Runner darf SSH
+      #   - key_name: kommt aus GitHub Secrets
+      # ------------------------------------------------------------
+      - name: "Terraform Apply"
+        run: |
+          terraform apply -auto-approve \
+            -var="ssh_allowed_cidr=${{ steps.runner-ip.outputs.ip }}" \
+            -var="key_name=${{ secrets.EC2_KEY_NAME }}"
+
+      # ------------------------------------------------------------
+      # Schritt 7: Public IP aus den Terraform Outputs lesen
+      # Da output eine JSON-Liste ist, nehmen wir den ersten Eintrag.
+      # ------------------------------------------------------------
+      - name: "Public IP der EC2-Instanz auslesen"
+        id: terraform-output
+        run: |
+          PUBLIC_IP=$(terraform output -json instanz_oeffentliche_ips | jq -r '.[0]')
+          echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
+          echo "Instanz Public IP: ${PUBLIC_IP}"
+
+      # ------------------------------------------------------------
+      # Schritt 8: Auf SSH-Erreichbarkeit warten (ohne sleep-Blindwarten)
+      # Prüft alle 5 Sekunden ob Port 22 erreichbar ist.
+      # Bricht nach 3 Minuten (36 Versuche) mit Fehler ab.
+      # ------------------------------------------------------------
+      - name: "Auf SSH-Erreichbarkeit warten"
+        run: |
+          PUBLIC_IP="${{ steps.terraform-output.outputs.public_ip }}"
+          echo "Warte auf SSH-Verbindung zu ${PUBLIC_IP}..."
+
+          VERSUCHE=0
+          MAX_VERSUCHE=36  # 36 × 5 Sekunden = 3 Minuten maximale Wartezeit
+
+          until nc -zv "${PUBLIC_IP}" 22 2>/dev/null; do
+            VERSUCHE=$((VERSUCHE + 1))
+            if [ "${VERSUCHE}" -ge "${MAX_VERSUCHE}" ]; then
+              echo "Fehler: SSH nach 3 Minuten nicht erreichbar. Abbruch."
+              exit 1
+            fi
+            echo "Versuch ${VERSUCHE}/${MAX_VERSUCHE}: SSH noch nicht bereit, warte 5 Sekunden..."
+            sleep 5
+          done
+
+          echo "SSH ist erreichbar nach ${VERSUCHE} Versuchen!"
+
+      # ------------------------------------------------------------
+      # Schritt 9: SSH-Schlüssel aus Secret sicher ablegen
+      # Die Datei wird am Ende des Workflows wieder gelöscht (Schritt 12).
+      # ------------------------------------------------------------
+      - name: "SSH-Schlüssel vorbereiten"
+        run: |
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/ec2-key.pem
+          chmod 400 /tmp/ec2-key.pem
+
+      # ------------------------------------------------------------
+      # Schritt 10: index.html erstellen und per SSH deployen
+      # Installiert Apache (httpd), kopiert die Datei und startet den Dienst.
+      # ------------------------------------------------------------
+      - name: "index.html per SSH auf EC2 deployen"
+        run: |
+          PUBLIC_IP="${{ steps.terraform-output.outputs.public_ip }}"
+          DEPLOY_DATUM=$(date '+%d.%m.%Y %H:%M:%S UTC')
+          COMMIT_SHA="${{ github.sha }}"
+          BRANCH="${{ github.ref_name }}"
+
+          # index.html lokal erstellen
+          cat > /tmp/index.html << EOF
+          <!DOCTYPE html>
+          <html lang="de">
+          <head>
+            <meta charset="UTF-8">
+            <title>Terraform + GitHub Actions</title>
+            <style>
+              body { font-family: sans-serif; max-width: 600px; margin: 60px auto; }
+              h1   { color: #2d6a4f; }
+              code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; }
+            </style>
+          </head>
+          <body>
+            <h1>Erfolgreich deployed!</h1>
+            <p>Diese Seite wurde automatisch via <strong>GitHub Actions + Terraform</strong> bereitgestellt.</p>
+            <ul>
+              <li><strong>Datum:</strong> ${DEPLOY_DATUM}</li>
+              <li><strong>Branch:</strong> <code>${BRANCH}</code></li>
+              <li><strong>Commit:</strong> <code>${COMMIT_SHA:0:7}</code></li>
+              <li><strong>Server:</strong> ${PUBLIC_IP}</li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+          # Datei auf EC2 hochladen
+          scp -i /tmp/ec2-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            /tmp/index.html \
+            ec2-user@${PUBLIC_IP}:/tmp/index.html
+
+          # Apache installieren, Datei verschieben und Dienst starten
+          ssh -i /tmp/ec2-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            ec2-user@${PUBLIC_IP} \
+            "sudo yum install -y httpd && \
+             sudo cp /tmp/index.html /var/www/html/index.html && \
+             sudo systemctl enable httpd && \
+             sudo systemctl start httpd"
+
+          echo "Webseite erreichbar unter: http://${PUBLIC_IP}"
+
+      # ------------------------------------------------------------
+      # Schritt 11: Verbindungstest — prüfen ob die Webseite antwortet
+      # ------------------------------------------------------------
+      - name: "Webseite erreichbar testen"
+        run: |
+          PUBLIC_IP="${{ steps.terraform-output.outputs.public_ip }}"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${PUBLIC_IP}")
+          if [ "${HTTP_STATUS}" = "200" ]; then
+            echo "Webseite antwortet mit HTTP 200 — Deployment erfolgreich!"
+          else
+            echo "Warnung: Webseite antwortet mit HTTP ${HTTP_STATUS}"
+          fi
+
+      # ------------------------------------------------------------
+      # Schritt 12: SSH-Schlüssel sicher löschen (immer ausführen)
+      # ------------------------------------------------------------
+      - name: "SSH-Schlüssel löschen"
+        if: always()
+        run: rm -f /tmp/ec2-key.pem /tmp/index.html
+
+      # ------------------------------------------------------------
+      # Schritt 13: Slack-Benachrichtigung — Erfolg
+      # Wird nur gesendet wenn alle vorherigen Schritte erfolgreich waren.
+      # Setzt voraus: SLACK_WEBHOOK_URL ist als GitHub Secret gesetzt.
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung senden (Erfolg)"
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ *Terraform Apply erfolgreich!*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Terraform Apply erfolgreich!*\n*Projekt:* `terraform-wiederholung`\n*Public IP:* `${{ steps.terraform-output.outputs.public_ip }}`\n*Branch:* `${{ github.ref_name }}`\n*Commit:* `${{ github.sha }}`\n*Ausgeführt von:* ${{ github.actor }}\n*Webseite:* http://${{ steps.terraform-output.outputs.public_ip }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      # ------------------------------------------------------------
+      # Schritt 14: Slack-Benachrichtigung — Fehler
+      # Wird nur gesendet wenn ein Schritt fehlgeschlagen ist.
+      # ------------------------------------------------------------
+      - name: "Slack-Benachrichtigung senden (Fehler)"
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "❌ *Terraform Apply fehlgeschlagen!*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Terraform Apply fehlgeschlagen!*\n*Projekt:* `terraform-wiederholung`\n*Branch:* `${{ github.ref_name }}`\n*Ausgeführt von:* ${{ github.actor }}\n*Details:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow-Log öffnen>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

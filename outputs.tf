@@ -1,86 +1,95 @@
 # ==============================================================
 # outputs.tf
-# Outputs are values Terraform prints after `apply` completes.
-# They are useful for:
-#   - Seeing resource details without opening the AWS Console
-#   - Passing values between Terraform modules
-#   - Scripting and automation
+# Ausgabewerte, die Terraform nach `apply` anzeigt.
+# Nützlich für:
+#   - Ressourcendetails ohne AWS-Konsole einsehen
+#   - Werte zwischen Terraform-Modulen weitergeben
+#   - Skripting und Automatisierung
 # ==============================================================
 
 
 # ==============================================================
-# EC2 INSTANCE OUTPUTS
-# Because we used `count`, these return lists (one per instance).
-# Example: ["3.72.1.10", "18.185.2.44"]
+# EC2-INSTANZ-AUSGABEN
+# Da wir `count` verwendet haben, sind dies Listen (eine pro Instanz).
+# Beispiel: ["3.72.1.10", "18.185.2.44"]
 # ==============================================================
 
-output "instance_ids" {
-  description = "List of EC2 instance IDs (use these in AWS CLI commands)"
+output "instanz_ids" {
+  description = "Liste der EC2-Instanz-IDs (für AWS-CLI-Befehle verwendbar)"
   value       = aws_instance.web[*].id
 }
 
-output "instance_public_ips" {
-  description = "List of public IP addresses for all EC2 instances"
+output "instanz_oeffentliche_ips" {
+  description = "Liste der öffentlichen IP-Adressen aller EC2-Instanzen"
   value       = aws_instance.web[*].public_ip
 }
 
-output "instance_public_dns" {
-  description = "List of public DNS names for all EC2 instances"
+output "instanz_oeffentliche_dns" {
+  description = "Liste der öffentlichen DNS-Namen aller EC2-Instanzen"
   value       = aws_instance.web[*].public_dns
 }
 
-output "instance_tags" {
-  description = "List of tag maps for all EC2 instances (useful for verification)"
+output "instanz_tags" {
+  description = "Liste der Tag-Maps aller EC2-Instanzen (zur Überprüfung)"
   value       = aws_instance.web[*].tags
+}
+
+output "verwendetes_ami" {
+  description = "ID und Name des automatisch gewählten Amazon Linux 2 AMI"
+  value = {
+    id   = data.aws_ami.amazon_linux.id
+    name = data.aws_ami.amazon_linux.name
+  }
 }
 
 
 # ==============================================================
-# SECURITY GROUP OUTPUT
+# SECURITY-GROUP-AUSGABE
 # ==============================================================
 
 output "security_group_id" {
-  description = "ID of the Security Group attached to the EC2 instances"
+  description = "ID der Security Group, die den EC2-Instanzen zugeordnet ist"
   value       = aws_security_group.web_sg.id
 }
 
 
 # ==============================================================
-# S3 BUCKET OUTPUTS
+# S3-BUCKET-AUSGABEN
 # ==============================================================
 
 output "s3_bucket_name" {
-  description = "Name of the created S3 bucket"
+  description = "Name des erstellten S3-Buckets"
   value       = aws_s3_bucket.main.bucket
 }
 
 output "s3_bucket_arn" {
-  description = "ARN (Amazon Resource Name) of the S3 bucket — needed for IAM policies"
+  description = "ARN (Amazon Resource Name) des S3-Buckets — wird für IAM-Richtlinien benötigt"
   value       = aws_s3_bucket.main.arn
 }
 
 output "s3_bucket_region" {
-  description = "The AWS region where the S3 bucket was created"
+  description = "AWS-Region, in der der S3-Bucket erstellt wurde"
   value       = aws_s3_bucket.main.region
 }
 
 
 # ==============================================================
-# SUMMARY OUTPUT
-# A combined output block showing the most important info at once.
-# This is printed cleanly after `terraform apply` finishes.
+# ZUSAMMENFASSUNG
+# Kombinierte Ausgabe mit den wichtigsten Informationen auf einen Blick.
+# Wird nach `terraform apply` übersichtlich angezeigt.
 # ==============================================================
 
-output "deployment_summary" {
-  description = "Quick summary of the deployed infrastructure"
+output "bereitstellungs_zusammenfassung" {
+  description = "Schnelle Übersicht der bereitgestellten Infrastruktur"
   value = {
-    project        = var.project_name
-    environment    = var.environment
-    region         = var.aws_region
-    instance_count = var.instance_count
-    instance_type  = var.aws_instance_type
-    public_ips     = aws_instance.web[*].public_ip
-    s3_bucket      = aws_s3_bucket.main.bucket
-    security_group = aws_security_group.web_sg.name
+    projekt          = var.project_name
+    umgebung         = var.environment
+    region           = var.aws_region
+    instanz_anzahl   = var.instance_count
+    instanz_typ      = var.aws_instance_type
+    oeffentliche_ips = aws_instance.web[*].public_ip
+    s3_bucket        = aws_s3_bucket.main.bucket
+    security_group   = aws_security_group.web_sg.name
+    ami_id           = data.aws_ami.amazon_linux.id
   }
 }
