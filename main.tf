@@ -152,6 +152,22 @@ resource "aws_instance" "web" {
 
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = file(pathexpand(var.ec2_private_key_path))
+    host        = self.public_ip
+    timeout     = "3m"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install -y httpd",
+      "sudo systemctl enable httpd",
+      "sudo systemctl start httpd",
+    ]
+  }
+
   tags = {
     Name        = "${var.project_name}-instanz-${count.index + 1}"
     Project     = var.project_name

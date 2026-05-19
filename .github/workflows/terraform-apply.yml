@@ -90,21 +90,30 @@ jobs:
         run: terraform init
 
       # ------------------------------------------------------------
-      # Schritt 6: Terraform Apply ausführen
-      # -auto-approve → keine manuelle Bestätigung erforderlich
-      # Variablen werden als Flags übergeben (keine hardcoded Werte in tfvars):
-      #   - ssh_allowed_cidr: nur der Runner darf SSH
-      #   - key_name: kommt aus GitHub Secrets
+      # Schritt 6: SSH-Schlüssel aus Secret sicher ablegen
+      # Muss VOR terraform apply bereitstehen, da der Provisioner
+      # in main.tf diesen Pfad während apply verwendet.
+      # Die Datei wird am Ende des Workflows wieder gelöscht (Schritt 10).
+      # ------------------------------------------------------------
+      - name: "SSH-Schlüssel vorbereiten"
+        run: |
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/ec2-key.pem
+          chmod 400 /tmp/ec2-key.pem
+
+      # ------------------------------------------------------------
+      # Schritt 7: Terraform Apply ausführen
+      # Der remote-exec Provisioner in main.tf verbindet sich automatisch
+      # per SSH und installiert Apache — kein separater SSH-Schritt nötig.
       # ------------------------------------------------------------
       - name: "Terraform Apply"
         run: |
           terraform apply -auto-approve \
             -var="ssh_allowed_cidr=${{ steps.runner-ip.outputs.ip }}" \
-            -var="key_name=${{ secrets.EC2_KEY_NAME }}"
+            -var="key_name=${{ secrets.EC2_KEY_NAME }}" \
+            -var="ec2_private_key_path=/tmp/ec2-key.pem"
 
       # ------------------------------------------------------------
-      # Schritt 7: Public IP aus den Terraform Outputs lesen
-      # Da output eine JSON-Liste ist, nehmen wir den ersten Eintrag.
+      # Schritt 8: Public IP aus den Terraform Outputs lesen
       # ------------------------------------------------------------
       - name: "Public IP der EC2-Instanz auslesen"
         id: terraform-output
@@ -114,42 +123,9 @@ jobs:
           echo "Instanz Public IP: ${PUBLIC_IP}"
 
       # ------------------------------------------------------------
-      # Schritt 8: Auf SSH-Erreichbarkeit warten (ohne sleep-Blindwarten)
-      # Prüft alle 5 Sekunden ob Port 22 erreichbar ist.
-      # Bricht nach 3 Minuten (36 Versuche) mit Fehler ab.
-      # ------------------------------------------------------------
-      - name: "Auf SSH-Erreichbarkeit warten"
-        run: |
-          PUBLIC_IP="${{ steps.terraform-output.outputs.public_ip }}"
-          echo "Warte auf SSH-Verbindung zu ${PUBLIC_IP}..."
-
-          VERSUCHE=0
-          MAX_VERSUCHE=36  # 36 × 5 Sekunden = 3 Minuten maximale Wartezeit
-
-          until nc -zv "${PUBLIC_IP}" 22 2>/dev/null; do
-            VERSUCHE=$((VERSUCHE + 1))
-            if [ "${VERSUCHE}" -ge "${MAX_VERSUCHE}" ]; then
-              echo "Fehler: SSH nach 3 Minuten nicht erreichbar. Abbruch."
-              exit 1
-            fi
-            echo "Versuch ${VERSUCHE}/${MAX_VERSUCHE}: SSH noch nicht bereit, warte 5 Sekunden..."
-            sleep 5
-          done
-
-          echo "SSH ist erreichbar nach ${VERSUCHE} Versuchen!"
-
-      # ------------------------------------------------------------
-      # Schritt 9: SSH-Schlüssel aus Secret sicher ablegen
-      # Die Datei wird am Ende des Workflows wieder gelöscht (Schritt 12).
-      # ------------------------------------------------------------
-      - name: "SSH-Schlüssel vorbereiten"
-        run: |
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/ec2-key.pem
-          chmod 400 /tmp/ec2-key.pem
-
-      # ------------------------------------------------------------
-      # Schritt 10: index.html erstellen und per SSH deployen
-      # Installiert Apache (httpd), kopiert die Datei und startet den Dienst.
+      # Schritt 9: index.html per SSH deployen
+      # Apache läuft bereits (durch Terraform Provisioner installiert).
+      # Hier wird nur die HTML-Datei mit Deploy-Infos kopiert.
       # ------------------------------------------------------------
       - name: "index.html per SSH auf EC2 deployen"
         run: |
@@ -158,7 +134,6 @@ jobs:
           COMMIT_SHA="${{ github.sha }}"
           BRANCH="${{ github.ref_name }}"
 
-          # index.html lokal erstellen
           cat > /tmp/index.html << EOF
           <!DOCTYPE html>
           <html lang="de">
@@ -184,27 +159,22 @@ jobs:
           </html>
           EOF
 
-          # Datei auf EC2 hochladen
           scp -i /tmp/ec2-key.pem \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             /tmp/index.html \
             ec2-user@${PUBLIC_IP}:/tmp/index.html
 
-          # Apache installieren, Datei verschieben und Dienst starten
           ssh -i /tmp/ec2-key.pem \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             ec2-user@${PUBLIC_IP} \
-            "sudo yum install -y httpd && \
-             sudo cp /tmp/index.html /var/www/html/index.html && \
-             sudo systemctl enable httpd && \
-             sudo systemctl start httpd"
+            "sudo cp /tmp/index.html /var/www/html/index.html"
 
           echo "Webseite erreichbar unter: http://${PUBLIC_IP}"
 
       # ------------------------------------------------------------
-      # Schritt 11: Verbindungstest — prüfen ob die Webseite antwortet
+      # Schritt 10: Verbindungstest — prüfen ob die Webseite antwortet
       # ------------------------------------------------------------
       - name: "Webseite erreichbar testen"
         run: |
@@ -217,14 +187,14 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # Schritt 12: SSH-Schlüssel sicher löschen (immer ausführen)
+      # Schritt 11: SSH-Schlüssel sicher löschen (immer ausführen)
       # ------------------------------------------------------------
       - name: "SSH-Schlüssel löschen"
         if: always()
         run: rm -f /tmp/ec2-key.pem /tmp/index.html
 
       # ------------------------------------------------------------
-      # Schritt 13: Slack-Benachrichtigung — Erfolg
+      # Schritt 12: Slack-Benachrichtigung — Erfolg
       # Wird nur gesendet wenn alle vorherigen Schritte erfolgreich waren.
       # Setzt voraus: SLACK_WEBHOOK_URL ist als GitHub Secret gesetzt.
       # ------------------------------------------------------------
@@ -250,7 +220,7 @@ jobs:
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
 
       # ------------------------------------------------------------
-      # Schritt 14: Slack-Benachrichtigung — Fehler
+      # Schritt 13: Slack-Benachrichtigung — Fehler
       # Wird nur gesendet wenn ein Schritt fehlgeschlagen ist.
       # ------------------------------------------------------------
       - name: "Slack-Benachrichtigung senden (Fehler)"

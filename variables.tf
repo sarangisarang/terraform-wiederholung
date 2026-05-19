@@ -48,6 +48,7 @@ variable "instance_count" {
 variable "key_name" {
   description = "Name des AWS Key-Pairs für den SSH-Zugang zu den EC2-Instanzen."
   type        = string
+  default     = "terraform-key"
 }
 
 
@@ -76,6 +77,16 @@ variable "environment" {
   description = "Umgebungsbezeichnung, z.B. dev, staging, prod."
   type        = string
   default     = "dev"
+}
+
+
+# --------------------------------------------------------------
+# Lokaler Pfad zur privaten SSH-Schlüsseldatei (.pem)
+# --------------------------------------------------------------
+variable "ec2_private_key_path" {
+  description = "Lokaler Pfad zur .pem-Datei für SSH-Verbindungen zu EC2-Instanzen."
+  type        = string
+  default     = "~/.ssh/mein-key.pem"
 }
 
 
