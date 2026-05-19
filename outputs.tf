@@ -29,11 +29,6 @@ output "instanz_oeffentliche_dns" {
   value       = aws_instance.web[*].public_dns
 }
 
-output "instanz_tags" {
-  description = "Liste der Tag-Maps aller EC2-Instanzen (zur Überprüfung)"
-  value       = aws_instance.web[*].tags
-}
-
 output "verwendetes_ami" {
   description = "ID und Name des automatisch gewählten Amazon Linux 2 AMI"
   value = {

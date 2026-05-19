@@ -128,7 +128,6 @@ jobs:
           fi
 
           echo "plan_exit=${PLAN_EXIT}" >> $GITHUB_OUTPUT
-        continue-on-error: false
 
       # ------------------------------------------------------------
       # Schritt 9: Plan-Output als PR-Kommentar posten
