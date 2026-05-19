@@ -37,11 +37,11 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "terraform-wiederholung-state-bucket" # <-- deinen Bucket-Namen einsetzen
-    key            = "terraform-wiederholung/terraform.tfstate"
-    region         = "eu-central-1"
-    dynamodb_table = "terraform-state-lock" # Verhindert gleichzeitiges Schreiben
-    encrypt        = true                   # State-Datei wird verschlüsselt gespeichert
+    bucket       = "terraform-wiederholung-state-bucket"
+    key          = "terraform-wiederholung/terraform.tfstate"
+    region       = "eu-central-1"
+    use_lockfile = true  # S3-natives Locking (ersetzt DynamoDB, ab Terraform 1.10)
+    encrypt      = true
   }
 }
 
