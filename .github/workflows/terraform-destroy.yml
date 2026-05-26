@@ -32,10 +32,6 @@ on:
         required: false
         default: "Manuelle Bereinigung"
 
-  # Zeitgesteuert: Montag–Freitag um 16:00 UTC (= 18:00 CET / 19:00 CEST)
-  schedule:
-    - cron: "0 16 * * 1-5"
-
 jobs:
   # ------------------------------------------------------------
   # Sicherheitsprüfung (nur bei manuellem Auslöser)
