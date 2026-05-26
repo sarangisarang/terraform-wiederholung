@@ -28,8 +28,7 @@ on:
   workflow_dispatch:
 
   # Zeitgesteuert: Montag–Freitag um 06:00 UTC (= 08:00 CET / 09:00 CEST)
-  schedule:
-    - cron: "0 6 * * 1-5"
+  
 
 jobs:
   terraform-apply:
